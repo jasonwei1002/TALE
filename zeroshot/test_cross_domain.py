@@ -40,7 +40,8 @@ network_cfg["ecg_model"] = "vit_small"
 network_cfg["use_jepa_init"] = False
 model = utils_builder.ECGCLIP(network_cfg)
 
-ckpt_path = (_THIS_DIR.parent / "checkpoints/best/vit_small_bestZeroShotAll_ckpt.pth").resolve()
+_default_ckpt = _THIS_DIR.parent / "checkpoints/best/vit_small_bestZeroShotAll_ckpt.pth"
+ckpt_path = Path(os.environ.get("TALE_DOMAIN_CKPT", str(_default_ckpt))).resolve()
 print(f"Loading checkpoint: {ckpt_path}")
 state = torch.load(str(ckpt_path), map_location="cpu")
 missing, unexpected = model.load_state_dict(state, strict=False)
