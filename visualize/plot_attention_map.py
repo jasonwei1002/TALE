@@ -469,8 +469,9 @@ def plot_attention_maps_compare(
     300 dpi、Arial sans-serif、字号在 7-11 pt 之间（双栏可读）。
     """
     mpl.rcParams.update({
-        "font.family": "sans-serif",
-        "font.sans-serif": ["Arial", "DejaVu Sans"],
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+        "mathtext.fontset": "stix",
         "font.size": 9,
         "axes.labelsize": 10,
         "axes.titlesize": 11,
@@ -596,8 +597,9 @@ def plot_attention_maps(
     布局：2 行 × 2 列，figsize=(7.16, 3.2)，适合 IEEE 双栏。
     """
     mpl.rcParams.update({
-        "font.family": "sans-serif",
-        "font.sans-serif": ["Arial", "DejaVu Sans"],
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+        "mathtext.fontset": "stix",
         "font.size": 9,
         "axes.labelsize": 10,
         "axes.titlesize": 11,
