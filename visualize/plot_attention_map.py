@@ -456,14 +456,29 @@ def plot_attention_maps_compare(
     ecg_lead: int = 1,
     seg_size: int = SEGMENT_SIZE,
 ):
-    """3 行 x 2 列：ECG / 完整 TALE / 消融。两侧共用同一组诊断词。"""
+    """3 行 x 2 列：ECG / 完整 TALE / 消融。两侧共用同一组诊断词。
+
+    Style: IEEE Transactions 友好 —— 色盲安全的 viridis colormap、
+    300 dpi、Arial sans-serif、字号在 7-11 pt 之间（双栏可读）。
+    """
     mpl.rcParams.update({
         "font.family": "sans-serif",
         "font.sans-serif": ["Arial", "DejaVu Sans"],
         "font.size": 9,
         "axes.labelsize": 10,
         "axes.titlesize": 11,
+        "axes.linewidth": 0.6,
+        "xtick.major.width": 0.5,
+        "ytick.major.width": 0.5,
+        "savefig.dpi": 300,
+        "pdf.fonttype": 42,   # IEEE 要求 TrueType（避免 Type-3 字体被退稿）
+        "ps.fonttype": 42,
     })
+
+    # OrRd: ColorBrewer 9-class Orange-Red，Nature/Cell 常用红系
+    # 从奶黄 → 橙 → 深红，层次比 Reds 丰富；单调递增 → 灰度打印仍有效
+    CMAP = "OrRd"
+    ECG_COLOR = "#1a1a1a"     # 接近黑但更柔和
 
     fig = plt.figure(figsize=(7.16, 5.2))
     gs = fig.add_gridspec(
@@ -485,11 +500,12 @@ def plot_attention_maps_compare(
         # ---- Row 0: ECG ----
         ax_ecg = fig.add_subplot(gs[0, col])
         lead_signal = ecg_raw[ecg_lead]
-        ax_ecg.plot(time_signal, lead_signal, color="#2c3e50", linewidth=0.6)
+        ax_ecg.plot(time_signal, lead_signal, color=ECG_COLOR, linewidth=0.7)
         ax_ecg.set_xlim(0, 10)
         ax_ecg.tick_params(axis="x", labelbottom=False, length=2)
         ax_ecg.set_yticks([])
-        ax_ecg.set_ylabel("Lead II", fontsize=7, rotation=90, labelpad=4)
+        if col == 0:
+            ax_ecg.set_ylabel("Lead II", fontsize=8, rotation=90, labelpad=4)
         for spine in ("top", "right", "left"):
             ax_ecg.spines[spine].set_visible(False)
         for s in range(1, n_segs):
@@ -511,7 +527,7 @@ def plot_attention_maps_compare(
             im = ax_attn.imshow(
                 attn_seg,
                 aspect="auto",
-                cmap="Reds",
+                cmap=CMAP,
                 interpolation="nearest",
                 vmin=0.0, vmax=sample_vmax,
                 extent=[0, 10, len(words) - 0.5, -0.5],
@@ -522,8 +538,9 @@ def plot_attention_maps_compare(
             ax_attn.set_xlim(0, 10)
             ax_attn.set_yticks(range(len(words)))
             ax_attn.set_yticklabels(words, fontsize=7)
-            # set_ylabel 自动落在 y-tick 文字外侧，避免之前 ax.text 与 tick 重叠
-            ax_attn.set_ylabel(row_title, fontsize=8, fontweight="bold", labelpad=8)
+            # 只在最左列（col == 0）显示行标题；右列共享同一行含义，省掉避免重复
+            if col == 0:
+                ax_attn.set_ylabel(row_title, fontsize=10, fontweight="bold", labelpad=8)
             if row_idx == 1:
                 ax_attn.set_xlabel("Time (s)", fontsize=8, labelpad=2)
             else:
@@ -533,9 +550,9 @@ def plot_attention_maps_compare(
             cax = div.append_axes("right", size="5%", pad=0.05)
             cb = fig.colorbar(im, cax=cax)
             cb.ax.tick_params(labelsize=5)
-            # 用科学计数法显示，避免数字溢出 colorbar
-            cb.formatter.set_powerlimits((-2, 2))
-            cb.update_ticks()
+            # 三个挑选的刻度（0、中位、最大），直接用三位小数显示，避免 1e-3 前缀
+            cb.set_ticks([0, sample_vmax / 2, sample_vmax])
+            cb.set_ticklabels([f"{t:.3f}" for t in [0, sample_vmax / 2, sample_vmax]])
 
         # 子图组标题放在第二个热力图下方
         ax_attn.text(
