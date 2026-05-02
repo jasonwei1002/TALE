@@ -1,0 +1,101 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+build/
+dist/
+.eggs/
+*.manifest
+*.spec
+
+# ---------- Virtualenv / package managers ----------
+.venv/
+venv/
+env/
+.env
+.env.*
+.python-version
+.uv/
+.pip-cache/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ---------- IDE / editor ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.cursor/
+
+# ---------- macOS / Windows ----------
+.DS_Store
+Thumbs.db
+
+# ---------- Notebook ----------
+.ipynb_checkpoints/
+
+# ---------- Model weights / checkpoints ----------
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+checkpoint/
+checkpoints/
+pretrain-ckpt/
+
+# ---------- Data caches ----------
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.parquet
+*.feather
+*.arrow
+*.dat
+*.mat
+*.wfdb
+*.hea
+
+# ---------- Datasets / preprocessed cache ----------
+datasets/
+data/
+data_cache/
+*.csv.gz
+# keep curated label-split CSVs that the codebase needs at runtime
+!finetune/data_split/**/*.csv
+
+# ---------- Experiment / training outputs ----------
+outputs/
+runs/
+wandb/
+swanlog/
+swanlab/
+mlruns/
+lightning_logs/
+tb_logs/
+tensorboard/
+logs/
+*.log
+
+# ---------- HuggingFace caches ----------
+.cache/
+huggingface/
+
+# ---------- Hydra runtime ----------
+.hydra/
+multirun/
+
+# ---------- Misc temp / scratch ----------
+tmp/
+temp/
+plan/
+visualize/*.png
+visualize/*.pdf
+*.bak
+*.orig
+.DS_Store
