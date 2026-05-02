@@ -174,16 +174,19 @@ def select_multilabel_samples(
     dataset: ECGDataset,
     combinations: list[list[str]],
     seed: int = 42,
+    prefer_clean: bool = True,
 ) -> dict[str, dict]:
     """
     为每个标签组合选取一个同时包含所有指定标签的样例。
 
-    返回:
-        {combo_key: {"idx": int, "labels": list[str]}}
+    Args:
+        prefer_clean: 优先选"label 总数最少"的样例（最接近"只含目标 combo"的纯样本），
+                      让 attention 不被无关合并疾病干扰。
     """
     rng = np.random.RandomState(seed)
-    labels = dataset.labels   # [N, num_classes]
+    labels = dataset.labels
     label_names = dataset.labels_name
+    total_count = labels.sum(axis=1)
 
     selected = {}
     for combo in combinations:
@@ -195,6 +198,16 @@ def select_multilabel_samples(
 
         if len(candidates) == 0:
             raise ValueError(f"找不到同时包含 {combo} 的样例，请调整 TARGET_COMBINATIONS")
+
+        if prefer_clean and len(candidates) > 1:
+            cand_counts = total_count[candidates]
+            min_count = int(cand_counts.min())
+            cleanest = candidates[cand_counts == min_count]
+            print(
+                f"  组合 {combo}: {len(candidates)} 个候选, "
+                f"最干净的 {len(cleanest)} 个 (合计标签数={min_count})"
+            )
+            candidates = cleanest
 
         idx = rng.choice(candidates)
         combo_key = "+".join(combo)
@@ -463,12 +476,6 @@ def plot_attention_maps_compare(
     time_signal = np.linspace(0, 10, 5000)
     n_segs = n_patches // seg_size
 
-    def _norm_per_row(attn: np.ndarray) -> np.ndarray:
-        rmin = attn.min(axis=1, keepdims=True)
-        rmax = attn.max(axis=1, keepdims=True)
-        denom = np.where(rmax - rmin > 1e-9, rmax - rmin, 1e-9)
-        return (attn - rmin) / denom
-
     for sample_idx in range(2):
         words = word_labels_list[sample_idx]
         ecg_raw = ecg_signals[sample_idx]
@@ -482,11 +489,7 @@ def plot_attention_maps_compare(
         ax_ecg.set_xlim(0, 10)
         ax_ecg.tick_params(axis="x", labelbottom=False, length=2)
         ax_ecg.set_yticks([])
-        ax_ecg.text(
-            -0.01, 0.5, "Lead II",
-            transform=ax_ecg.transAxes,
-            fontsize=7, rotation=90, va="center", ha="right",
-        )
+        ax_ecg.set_ylabel("Lead II", fontsize=7, rotation=90, labelpad=4)
         for spine in ("top", "right", "left"):
             ax_ecg.spines[spine].set_visible(False)
         for s in range(1, n_segs):
@@ -496,20 +499,21 @@ def plot_attention_maps_compare(
         dummy = div_ecg.append_axes("right", size="5%", pad=0.05)
         dummy.set_visible(False)
 
-        # ---- Rows 1 & 2: attention heatmaps ----
-        for row_idx, (attn_raw, row_title) in enumerate(zip(
-            (attn_maps_full[sample_idx], attn_maps_abl[sample_idx]),
-            row_titles,
+        # ---- Rows 1 & 2: attention heatmaps，两模型共享 vmax ----
+        attn_full_seg = aggregate_patches(attn_maps_full[sample_idx], seg_size)
+        attn_abl_seg = aggregate_patches(attn_maps_abl[sample_idx], seg_size)
+        sample_vmax = float(max(attn_full_seg.max(), attn_abl_seg.max()))
+
+        for row_idx, (attn_seg, row_title) in enumerate(zip(
+            (attn_full_seg, attn_abl_seg), row_titles,
         )):
-            attn = aggregate_patches(attn_raw, seg_size)
-            attn = _norm_per_row(attn)
             ax_attn = fig.add_subplot(gs[1 + row_idx, col], sharex=ax_ecg)
             im = ax_attn.imshow(
-                attn,
+                attn_seg,
                 aspect="auto",
                 cmap="Reds",
                 interpolation="nearest",
-                vmin=0.0, vmax=1.0,
+                vmin=0.0, vmax=sample_vmax,
                 extent=[0, 10, len(words) - 0.5, -0.5],
             )
             xticks = np.linspace(0, 10, 6)
@@ -518,12 +522,8 @@ def plot_attention_maps_compare(
             ax_attn.set_xlim(0, 10)
             ax_attn.set_yticks(range(len(words)))
             ax_attn.set_yticklabels(words, fontsize=7)
-            ax_attn.text(
-                -0.18, 0.5, row_title,
-                transform=ax_attn.transAxes,
-                fontsize=8, fontweight="bold",
-                rotation=90, va="center", ha="right",
-            )
+            # set_ylabel 自动落在 y-tick 文字外侧，避免之前 ax.text 与 tick 重叠
+            ax_attn.set_ylabel(row_title, fontsize=8, fontweight="bold", labelpad=8)
             if row_idx == 1:
                 ax_attn.set_xlabel("Time (s)", fontsize=8, labelpad=2)
             else:
@@ -533,6 +533,9 @@ def plot_attention_maps_compare(
             cax = div.append_axes("right", size="5%", pad=0.05)
             cb = fig.colorbar(im, cax=cax)
             cb.ax.tick_params(labelsize=5)
+            # 用科学计数法显示，避免数字溢出 colorbar
+            cb.formatter.set_powerlimits((-2, 2))
+            cb.update_ticks()
 
         # 子图组标题放在第二个热力图下方
         ax_attn.text(
