@@ -147,7 +147,12 @@ def collect_paired_entropies(
 
 
 def plot_paired(full_h, abl_h, output_path):
-    """Paired violin + scatter; report p-values inside the figure."""
+    """Paired-difference histogram with Cohen's d_z and improved%.
+
+    For paired data, the only honest visualization is the distribution of
+    differences: Δ = H_full − H_abl. Bars left of 0 → full has lower entropy
+    (sharper alignment); bars right of 0 → ablation has lower entropy.
+    """
     mpl.rcParams.update({
         "font.family": "sans-serif",
         "font.sans-serif": ["Arial", "DejaVu Sans"],
@@ -158,56 +163,78 @@ def plot_paired(full_h, abl_h, output_path):
         "ps.fonttype": 42,
     })
 
+    full_h = np.asarray(full_h)
+    abl_h = np.asarray(abl_h)
     n = len(full_h)
-    delta = abl_h - full_h
+    delta = full_h - abl_h           # 负值 = 完整模型熵更小（更尖锐）
+
+    # ---- 统计量 ----
     t_stat, p_t = stats.ttest_rel(full_h, abl_h)
     w_stat, p_w = stats.wilcoxon(full_h, abl_h)
-    print(f"  n={n}  mean(full)={full_h.mean():.4f}  mean(abl)={abl_h.mean():.4f}")
-    print(f"  paired t: t={t_stat:.3f}, p={p_t:.3e}")
-    print(f"  Wilcoxon: W={w_stat:.1f}, p={p_w:.3e}")
-    print(f"  abl - full: median Δ = {np.median(delta):.4f}")
+    mean_d = float(delta.mean())
+    median_d = float(np.median(delta))
+    sd_d = float(delta.std(ddof=1))
+    cohen_dz = mean_d / sd_d if sd_d > 0 else float("nan")
+    se = sd_d / np.sqrt(n)
+    ci_low, ci_high = mean_d - 1.96 * se, mean_d + 1.96 * se
+    n_improved = int((delta < 0).sum())
+    pct_improved = 100.0 * n_improved / n
 
-    fig, ax = plt.subplots(figsize=(3.5, 3.0))
+    print(f"\n--- paired-difference statistics ---")
+    print(f"  n            = {n}")
+    print(f"  Δ̄            = {mean_d:+.4f}   (95% CI [{ci_low:+.4f}, {ci_high:+.4f}])")
+    print(f"  median(Δ)    = {median_d:+.4f}")
+    print(f"  SD(Δ)        = {sd_d:.4f}")
+    print(f"  Cohen's dz   = {cohen_dz:+.3f}")
+    print(f"  improved%    = {pct_improved:.1f}% ({n_improved}/{n} samples)")
+    print(f"  paired t     = {t_stat:.2f},  p = {p_t:.2e}")
+    print(f"  Wilcoxon     = {w_stat:.1f}, p = {p_w:.2e}")
 
-    parts = ax.violinplot(
-        [full_h, abl_h],
-        positions=[0, 1],
-        widths=0.6,
-        showmedians=True,
-        showextrema=False,
-    )
-    colors = ["#a50f15", "#bdbdbd"]
-    for body, c in zip(parts["bodies"], colors):
-        body.set_facecolor(c)
-        body.set_edgecolor("black")
-        body.set_alpha(0.7)
-    parts["cmedians"].set_color("black")
-    parts["cmedians"].set_linewidth(1.2)
+    # ---- 画图 ----
+    fig, ax = plt.subplots(figsize=(3.6, 2.9))
 
-    # paired scatter（细线连接每对样本）
-    rng = np.random.RandomState(0)
-    jitter = rng.uniform(-0.05, 0.05, size=n)
-    for i in range(n):
-        ax.plot(
-            [0 + jitter[i], 1 + jitter[i]],
-            [full_h[i], abl_h[i]],
-            color="black", linewidth=0.2, alpha=0.15, zorder=1,
+    n_bins = 35
+    color_neg = "#a50f15"   # red 浪漫色：full 更优
+    color_pos = "#bdbdbd"   # gray：full 更差
+    bin_edges = np.linspace(delta.min(), delta.max(), n_bins + 1)
+    counts, _ = np.histogram(delta, bins=bin_edges)
+    for i, c in enumerate(counts):
+        mid = 0.5 * (bin_edges[i] + bin_edges[i + 1])
+        bar_color = color_neg if mid < 0 else color_pos
+        ax.bar(
+            bin_edges[i], c, width=bin_edges[i + 1] - bin_edges[i],
+            align="edge", color=bar_color,
+            edgecolor="black", linewidth=0.3, alpha=0.85,
         )
-    ax.scatter([0 + j for j in jitter], full_h,
-               s=4, color=colors[0], alpha=0.4, zorder=2)
-    ax.scatter([1 + j for j in jitter], abl_h,
-               s=4, color=colors[1], alpha=0.4, zorder=2)
 
-    ax.set_xticks([0, 1])
-    ax.set_xticklabels(["TALE\n(full)", "w/o\nlocal loss"], fontsize=9)
-    ax.set_ylabel("Mean per-word attention entropy", fontsize=9)
-    ax.set_title(
-        f"Lower = sharper alignment   (n={n})\n"
-        f"paired t: p={p_t:.2e}   Wilcoxon: p={p_w:.2e}",
-        fontsize=8,
-        pad=6,
+    # 0 参考线
+    ymax = ax.get_ylim()[1]
+    ax.axvline(0, color="black", linestyle="--", linewidth=1.0, zorder=4)
+    ax.text(0, ymax * 0.97, " no effect", fontsize=7,
+            va="top", ha="left", color="black")
+
+    # 均值 Δ̄
+    ax.axvline(mean_d, color="#0b3d91", linestyle="-", linewidth=1.4, zorder=5)
+    ax.text(mean_d, ymax * 0.83,
+            f" $\\bar{{\\Delta}}={mean_d:+.3f}$",
+            fontsize=8, va="top", ha="left", color="#0b3d91")
+
+    ax.set_xlabel(r"$\Delta$ entropy = $H_{\mathrm{full}} - H_{\mathrm{w/o\ local}}$",
+                  fontsize=9)
+    ax.set_ylabel("# samples", fontsize=9)
+
+    p_exp = int(np.floor(np.log10(max(p_t, 1e-300))))
+    title = (
+        "TALE (full) reduces attention entropy\n"
+        f"$d_z={cohen_dz:.2f}$, "
+        f"{pct_improved:.0f}% improved, "
+        f"$p<10^{{{p_exp}}}$  ($n={n}$)"
     )
+    ax.set_title(title, fontsize=8.5, pad=5)
+
     ax.grid(axis="y", linestyle=":", linewidth=0.4, alpha=0.5)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     fig.savefig(output_path, dpi=300, bbox_inches="tight")

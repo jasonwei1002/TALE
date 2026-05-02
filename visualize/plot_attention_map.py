@@ -508,16 +508,10 @@ def plot_attention_maps_compare(
         lead_idx = ecg_leads[sample_idx]
         lead_name = _LEAD_NAMES[lead_idx] if 0 <= lead_idx < len(_LEAD_NAMES) else f"Ch.{lead_idx}"
 
-        # ---- 找完整模型 attention 在哪个时间段最强（用于跨行垂直对齐线）----
+        # ---- 两模型共享 vmax ----
         attn_full_seg = aggregate_patches(attn_maps_full[sample_idx], seg_size)
         attn_abl_seg = aggregate_patches(attn_maps_abl[sample_idx], seg_size)
         sample_vmax = float(max(attn_full_seg.max(), attn_abl_seg.max()))
-
-        # 跨词平均后取相对峰值 (>= 70% of max) 的 segment 作为标记点
-        mean_attn = attn_full_seg.mean(axis=0)
-        peak_thresh = mean_attn.max() * 0.75
-        peak_segs = np.where(mean_attn >= peak_thresh)[0]
-        peak_times = [(s + 0.5) * (10.0 / n_segs) for s in peak_segs]
 
         # ---- Row 0: ECG ----
         ax_ecg = fig.add_subplot(gs[0, col])
@@ -533,10 +527,6 @@ def plot_attention_maps_compare(
         for s in range(1, n_segs):
             t = s * seg_size * (10.0 / n_patches)
             ax_ecg.axvline(t, color="#bdc3c7", linewidth=0.3, alpha=0.4)
-        # 跨行对齐线：在 peak segment 上画一条贯穿三行的虚线
-        for pt in peak_times:
-            ax_ecg.axvline(pt, color="#1a5fb4", linestyle="--",
-                           linewidth=0.8, alpha=0.7, zorder=3)
         div_ecg = make_axes_locatable(ax_ecg)
         dummy = div_ecg.append_axes("right", size="5%", pad=0.05)
         dummy.set_visible(False)
@@ -566,11 +556,6 @@ def plot_attention_maps_compare(
                 ax_attn.set_xlabel("Time (s)", fontsize=8, labelpad=2)
             else:
                 ax_attn.tick_params(axis="x", labelbottom=False)
-
-            # 跨行对齐线：在 peak segment 上画一条贯穿三行的虚线
-            for pt in peak_times:
-                ax_attn.axvline(pt, color="#1a5fb4", linestyle="--",
-                                linewidth=0.8, alpha=0.7, zorder=3)
 
             div = make_axes_locatable(ax_attn)
             cax = div.append_axes("right", size="5%", pad=0.05)
