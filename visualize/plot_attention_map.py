@@ -71,6 +71,10 @@ DATASET_CONFIGS = {
         # PVC: 孤立宽 QRS 心搏（最戏剧性的时间局部事件）
         # STE: ST 段抬高（每拍 ST 区段都该点亮）
         "default_combos": [["PVC"], ["STE"]],
+        # 每个 combo 用最具诊断意义的导联展示：
+        #   PVC: Lead II (idx=1) — 节律导联，宽 QRS 心搏最直观
+        #   STE: V2  (idx=7)    — 前壁/前侧壁 STE 抬高最显眼
+        "default_leads": [1, 7],
     },
     "ptbxl-rhythm": {
         "data_subdir": "ptbxl",
@@ -444,6 +448,9 @@ def aggregate_patches(attn_map: np.ndarray, seg_size: int) -> np.ndarray:
     return trimmed.reshape(n_words, n_segs, seg_size).mean(axis=2)
 
 
+_LEAD_NAMES = ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"]
+
+
 def plot_attention_maps_compare(
     attn_maps_full: list[np.ndarray],
     attn_maps_abl: list[np.ndarray],
@@ -453,7 +460,7 @@ def plot_attention_maps_compare(
     n_patches: int,
     output_path: str,
     row_titles: tuple[str, str] = ("TALE (full)", "w/o local loss"),
-    ecg_lead: int = 1,
+    ecg_leads: list[int] | None = None,   # 每列各自的导联索引
     seg_size: int = SEGMENT_SIZE,
 ):
     """3 行 x 2 列：ECG / 完整 TALE / 消融。两侧共用同一组诊断词。
@@ -490,35 +497,49 @@ def plot_attention_maps_compare(
 
     time_signal = np.linspace(0, 10, 5000)
     n_segs = n_patches // seg_size
+    if ecg_leads is None:
+        ecg_leads = [1, 1]   # 默认全部 Lead II
 
     for sample_idx in range(2):
         words = word_labels_list[sample_idx]
         ecg_raw = ecg_signals[sample_idx]
         cls_name = class_names[sample_idx]
         col = sample_idx
+        lead_idx = ecg_leads[sample_idx]
+        lead_name = _LEAD_NAMES[lead_idx] if 0 <= lead_idx < len(_LEAD_NAMES) else f"Ch.{lead_idx}"
+
+        # ---- 找完整模型 attention 在哪个时间段最强（用于跨行垂直对齐线）----
+        attn_full_seg = aggregate_patches(attn_maps_full[sample_idx], seg_size)
+        attn_abl_seg = aggregate_patches(attn_maps_abl[sample_idx], seg_size)
+        sample_vmax = float(max(attn_full_seg.max(), attn_abl_seg.max()))
+
+        # 跨词平均后取相对峰值 (>= 70% of max) 的 segment 作为标记点
+        mean_attn = attn_full_seg.mean(axis=0)
+        peak_thresh = mean_attn.max() * 0.75
+        peak_segs = np.where(mean_attn >= peak_thresh)[0]
+        peak_times = [(s + 0.5) * (10.0 / n_segs) for s in peak_segs]
 
         # ---- Row 0: ECG ----
         ax_ecg = fig.add_subplot(gs[0, col])
-        lead_signal = ecg_raw[ecg_lead]
+        lead_signal = ecg_raw[lead_idx]
         ax_ecg.plot(time_signal, lead_signal, color=ECG_COLOR, linewidth=0.7)
         ax_ecg.set_xlim(0, 10)
         ax_ecg.tick_params(axis="x", labelbottom=False, length=2)
         ax_ecg.set_yticks([])
-        if col == 0:
-            ax_ecg.set_ylabel("Lead II", fontsize=8, rotation=90, labelpad=4)
+        # 每列单独显示导联名（PVC 看 II，STE 看 V2 等）
+        ax_ecg.set_ylabel(f"Lead {lead_name}", fontsize=8, rotation=90, labelpad=4)
         for spine in ("top", "right", "left"):
             ax_ecg.spines[spine].set_visible(False)
         for s in range(1, n_segs):
             t = s * seg_size * (10.0 / n_patches)
             ax_ecg.axvline(t, color="#bdc3c7", linewidth=0.3, alpha=0.4)
+        # 跨行对齐线：在 peak segment 上画一条贯穿三行的虚线
+        for pt in peak_times:
+            ax_ecg.axvline(pt, color="#1a5fb4", linestyle="--",
+                           linewidth=0.8, alpha=0.7, zorder=3)
         div_ecg = make_axes_locatable(ax_ecg)
         dummy = div_ecg.append_axes("right", size="5%", pad=0.05)
         dummy.set_visible(False)
-
-        # ---- Rows 1 & 2: attention heatmaps，两模型共享 vmax ----
-        attn_full_seg = aggregate_patches(attn_maps_full[sample_idx], seg_size)
-        attn_abl_seg = aggregate_patches(attn_maps_abl[sample_idx], seg_size)
-        sample_vmax = float(max(attn_full_seg.max(), attn_abl_seg.max()))
 
         for row_idx, (attn_seg, row_title) in enumerate(zip(
             (attn_full_seg, attn_abl_seg), row_titles,
@@ -545,6 +566,11 @@ def plot_attention_maps_compare(
                 ax_attn.set_xlabel("Time (s)", fontsize=8, labelpad=2)
             else:
                 ax_attn.tick_params(axis="x", labelbottom=False)
+
+            # 跨行对齐线：在 peak segment 上画一条贯穿三行的虚线
+            for pt in peak_times:
+                ax_attn.axvline(pt, color="#1a5fb4", linestyle="--",
+                                linewidth=0.8, alpha=0.7, zorder=3)
 
             div = make_axes_locatable(ax_attn)
             cax = div.append_axes("right", size="5%", pad=0.05)
@@ -761,7 +787,8 @@ def main():
         attn_full, tokens = extract_attention(model, ecg, prompt_text, device)
         attn_full, tokens = merge_subwords(attn_full, tokens)
         attn_full, tokens = fix_hyphenated_words(attn_full, tokens)
-        keep, dedup_labels = select_top_words(attn_full, tokens, max_words=10)
+        # 6 个最 distinct 的诊断词足以体现局部对齐；之前 10 个里同义词重复严重
+        keep, dedup_labels = select_top_words(attn_full, tokens, max_words=6)
         attn_full_keep, words_keep = apply_word_indices(
             attn_full, tokens, keep, dedup_labels
         )
@@ -783,10 +810,12 @@ def main():
             attn_maps_abl.append(attn_abl_keep)
 
     n_patches = attn_maps[0].shape[1]
+    # 每个 combo 对应的导联：优先 dataset config 的 default_leads，否则全 II
+    ecg_leads = cfg.get("default_leads", [1] * len(combos))[: len(combos)]
     if model_abl is not None:
         plot_attention_maps_compare(
             attn_maps, attn_maps_abl, word_labels_list, ecg_signals,
-            panel_names, n_patches, args.output,
+            panel_names, n_patches, args.output, ecg_leads=ecg_leads,
         )
     else:
         plot_attention_maps(
