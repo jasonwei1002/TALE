@@ -12,7 +12,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 GPU="${1:-0}"
 CKPT_FULL="${PROJECT_ROOT}/checkpoints/best/vit_small_bestZeroShotAll_ckpt.pth"
 CKPT_ABL="${PROJECT_ROOT}/checkpoints/去掉局部对比/vit_small_bestZeroShotAll_ckpt.pth"
-OUTPUT="${PROJECT_ROOT}/visualize/fig-local-alignment-compare.pdf"
+OUTPUT="${PROJECT_ROOT}/visualize/fig-local-alignment-compare.png"
 
 for f in "${CKPT_FULL}" "${CKPT_ABL}"; do
   if [[ ! -f "${f}" ]]; then

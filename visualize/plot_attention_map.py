@@ -9,7 +9,7 @@
     python visualize/plot_attention_map.py \
         --ckpt /path/to/bestZeroShotAll_ckpt.pth \
         --data_root /path/to/datasets/finetune \
-        --output figures/fig-attention-map.pdf
+        --output figures/fig-attention-map.png
 """
 
 import argparse
@@ -136,7 +136,7 @@ def parse_args():
     parser.add_argument(
         "--output",
         type=str,
-        default=str(PROJECT_ROOT / "第三篇论文" / "figures" / "fig-attention-map.pdf"),
+        default=str(PROJECT_ROOT / "第三篇论文" / "figures" / "fig-attention-map.png"),
         help="输出图片路径",
     )
     parser.add_argument("--device", type=str, default="cuda")
