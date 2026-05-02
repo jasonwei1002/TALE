@@ -44,12 +44,42 @@ PROJ_DIM = 256
 # 200 patches / 20 = 10 segments，每段对应 1.0s
 SEGMENT_SIZE = 20
 
-# PTB-XL Super Class 的 5 类标签
-SUPER_CLASSES = ["NORM", "CD", "HYP", "MI", "STTC"]
 
-# 两个多标签组合：每个组合选取同时包含所有指定标签的样本，
-# 拼接各标签 prompt 后提取 attention，期望不同词对应不同时间段。
-TARGET_COMBINATIONS = [["MI", "STTC"], ["CD", "HYP"]]
+# 各 PTB-XL 子任务的可视化预设。
+#   data_subdir:   ECG 文件根目录相对 data_root 的子路径
+#   split_subpath: 测试 CSV 相对 data_root 的子路径
+#   dataset_name:  传给 ECGDataset 的 dataset_name
+#   default_combos: 默认两个最具戏剧性局部对齐效果的标签组合
+DATASET_CONFIGS = {
+    "ptbxl-super": {
+        "data_subdir": "ptbxl",
+        "split_subpath": "data_split/ptbxl/super_class/ptbxl_super_class_test.csv",
+        "dataset_name": "ptbxl",
+        "default_combos": [["MI", "STTC"], ["CD", "HYP"]],
+    },
+    "ptbxl-sub": {
+        "data_subdir": "ptbxl",
+        "split_subpath": "data_split/ptbxl/sub_class/ptbxl_sub_class_test.csv",
+        "dataset_name": "ptbxl",
+        # WPW: delta-wave 形态非常局部；LVH: 高 R 波，整段心搏都有
+        "default_combos": [["WPW"], ["LVH"]],
+    },
+    "ptbxl-form": {
+        "data_subdir": "ptbxl",
+        "split_subpath": "data_split/ptbxl/form/ptbxl_form_test.csv",
+        "dataset_name": "ptbxl",
+        # PVC: 孤立宽 QRS 心搏（最戏剧性的时间局部事件）
+        # STE: ST 段抬高（每拍 ST 区段都该点亮）
+        "default_combos": [["PVC"], ["STE"]],
+    },
+    "ptbxl-rhythm": {
+        "data_subdir": "ptbxl",
+        "split_subpath": "data_split/ptbxl/rhythm/ptbxl_rhythm_test.csv",
+        "dataset_name": "ptbxl",
+        # AFIB: 全程不规则；BIGU: 二联律（正常–PVC 交替）—— 一个全局一个交替
+        "default_combos": [["AFIB"], ["BIGU"]],
+    },
+}
 
 
 def parse_args():
@@ -57,8 +87,17 @@ def parse_args():
     parser.add_argument(
         "--ckpt",
         type=str,
-        default="/public/home/hs_mmcd_5/project/jasonwei/MERL/checkpoints/best/resnet18_bestZeroShotAll_ckpt.pth",
-        help="ECGCLIP checkpoint 路径",
+        default=str(PROJECT_ROOT / "checkpoints/best/vit_small_bestZeroShotAll_ckpt.pth"),
+        help="完整 TALE checkpoint 路径",
+    )
+    parser.add_argument(
+        "--ckpt-ablation",
+        type=str,
+        default=None,
+        help=(
+            "消融 checkpoint（w/o local loss）路径。提供时图变为 3 行 x 2 列布局："
+            "ECG / 完整 TALE / 消融。"
+        ),
     )
     parser.add_argument(
         "--data_root",
@@ -67,10 +106,26 @@ def parse_args():
         help="下游数据集根目录",
     )
     parser.add_argument(
+        "--dataset",
+        type=str,
+        default="ptbxl-form",
+        choices=sorted(DATASET_CONFIGS.keys()),
+        help="可视化使用的 PTB-XL 子任务，默认 ptbxl-form (PVC+STE 局部最戏剧)",
+    )
+    parser.add_argument(
+        "--combinations",
+        type=str,
+        default=None,
+        help=(
+            "覆盖默认标签组合，JSON 形式，如 '[[\"PVC\"],[\"STE\"]]'。"
+            "若不传，使用所选 dataset 的默认 dramatic preset。"
+        ),
+    )
+    parser.add_argument(
         "--split_csv",
         type=str,
         default=None,
-        help="PTB-XL super class 测试集 CSV 路径（默认自动拼接）",
+        help="测试集 CSV 路径（默认按 --dataset 自动拼接）",
     )
     parser.add_argument(
         "--prompt_json",
@@ -298,52 +353,69 @@ def deduplicate_words(
     return np.stack(merged_attn, axis=0), merged_labels
 
 
+_STOPWORDS = {
+    "a", "an", "the", "of", "in", "on", "at", "to", "for", "and", "or",
+    "is", "are", "was", "were", "with", "by", "from", "as", "it", "its",
+    "that", "this", "be", "has", "have", "had", "not", "no", "but", "if",
+    ",", ".", ";", ":", "-", "(", ")", "/", "type", "related", "i", "ii",
+    "non", "specific", "specifc", "abnormal", "normal", "associated",
+    "including", "without", "with", "due", "other", "also", "patient",
+    "rhythm", "node",
+    "standing",
+}
+
+
+def select_top_words(
+    attn_map: np.ndarray,
+    word_labels: list[str],
+    max_words: int = 12,
+) -> tuple[list[int], list[str]]:
+    """去重 → 去停用词 → 按 attention 峰值取 top-K，返回索引到原数组的位置。
+
+    返回值:
+        keep_indices_in_dedup: 在 deduplicated 序列中要保留的索引（已排序）
+        merged_labels:         deduplicated 的完整 word_labels（用于 indexing）
+    """
+    attn_dedup, labels_dedup = deduplicate_words(attn_map, word_labels)
+
+    keep = [
+        i for i, w in enumerate(labels_dedup)
+        if w.lower().strip() not in _STOPWORDS and len(w.strip()) > 1
+    ]
+    if not keep:
+        keep = list(range(len(labels_dedup)))
+
+    if len(keep) > max_words:
+        peak = attn_dedup[keep].max(axis=1)
+        order = np.argsort(peak)[-max_words:]
+        keep = sorted(int(keep[i]) for i in order)
+
+    return keep, labels_dedup
+
+
+def apply_word_indices(
+    attn_map: np.ndarray,
+    word_labels: list[str],
+    keep_indices: list[int],
+    dedup_labels: list[str],
+) -> tuple[np.ndarray, list[str]]:
+    """用 ``keep_indices``（基于 deduplicated 序列）从 ``attn_map`` 抽出对应行。
+
+    要求 ``attn_map`` / ``word_labels`` 与 ``dedup_labels`` 来自同一 tokenization
+    （token 数和顺序一致）；deduplicate_words 是确定性的，所以两次调用的输出索引可对齐。
+    """
+    attn_dedup, _ = deduplicate_words(attn_map, word_labels)
+    return attn_dedup[keep_indices], [dedup_labels[i] for i in keep_indices]
+
+
 def filter_diagnostic_words(
     attn_map: np.ndarray,
     word_labels: list[str],
     max_words: int = 12,
 ) -> tuple[np.ndarray, list[str]]:
-    """
-    去重 → 过滤停用词和标点 → 按 attention 集中度取 top-K。
-    """
-    # 先去重
-    attn_map, word_labels = deduplicate_words(attn_map, word_labels)
-
-    stopwords = {
-        "a", "an", "the", "of", "in", "on", "at", "to", "for", "and", "or",
-        "is", "are", "was", "were", "with", "by", "from", "as", "it", "its",
-        "that", "this", "be", "has", "have", "had", "not", "no", "but", "if",
-        ",", ".", ";", ":", "-", "(", ")", "/", "type", "related", "i", "ii",
-        # 前缀/副词/非诊断词
-        "non", "specific", "specifc", "abnormal", "normal", "associated",
-        "including", "without", "with", "due", "other", "also", "patient",
-        # rhythm 相关通用词（保留诊断术语本身）
-        "rhythm", "node",
-        # 连字符化合词的残留后缀（fix_hyphenated_words 未处理时的兜底）
-        "standing",
-    }
-
-    keep_indices = []
-    for i, word in enumerate(word_labels):
-        w_lower = word.lower().strip()
-        if w_lower not in stopwords and len(w_lower) > 1:
-            keep_indices.append(i)
-
-    if not keep_indices:
-        keep_indices = list(range(len(word_labels)))
-
-    filtered_attn = attn_map[keep_indices]
-    filtered_labels = [word_labels[i] for i in keep_indices]
-
-    # 按 attention 峰值（最大值）排序，取 top-K
-    if len(filtered_labels) > max_words:
-        peak_scores = filtered_attn.max(axis=1)
-        top_indices = np.argsort(peak_scores)[-max_words:]
-        top_indices = np.sort(top_indices)  # 保持原始顺序
-        filtered_attn = filtered_attn[top_indices]
-        filtered_labels = [filtered_labels[i] for i in top_indices]
-
-    return filtered_attn, filtered_labels
+    """单模型版本：等价于 select_top_words + apply_word_indices."""
+    keep, dedup_labels = select_top_words(attn_map, word_labels, max_words)
+    return apply_word_indices(attn_map, word_labels, keep, dedup_labels)
 
 
 def aggregate_patches(attn_map: np.ndarray, seg_size: int) -> np.ndarray:
@@ -357,6 +429,124 @@ def aggregate_patches(attn_map: np.ndarray, seg_size: int) -> np.ndarray:
     trimmed = attn_map[:, :n_segs * seg_size]
     # reshape 并求均值
     return trimmed.reshape(n_words, n_segs, seg_size).mean(axis=2)
+
+
+def plot_attention_maps_compare(
+    attn_maps_full: list[np.ndarray],
+    attn_maps_abl: list[np.ndarray],
+    word_labels_list: list[list[str]],
+    ecg_signals: list[np.ndarray],
+    class_names: list[str],
+    n_patches: int,
+    output_path: str,
+    row_titles: tuple[str, str] = ("TALE (full)", "w/o local loss"),
+    ecg_lead: int = 1,
+    seg_size: int = SEGMENT_SIZE,
+):
+    """3 行 x 2 列：ECG / 完整 TALE / 消融。两侧共用同一组诊断词。"""
+    mpl.rcParams.update({
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Arial", "DejaVu Sans"],
+        "font.size": 9,
+        "axes.labelsize": 10,
+        "axes.titlesize": 11,
+    })
+
+    fig = plt.figure(figsize=(7.16, 5.2))
+    gs = fig.add_gridspec(
+        3, 2,
+        height_ratios=[1, 2.5, 2.5],
+        hspace=0.18,
+        wspace=0.55,
+    )
+
+    time_signal = np.linspace(0, 10, 5000)
+    n_segs = n_patches // seg_size
+
+    def _norm_per_row(attn: np.ndarray) -> np.ndarray:
+        rmin = attn.min(axis=1, keepdims=True)
+        rmax = attn.max(axis=1, keepdims=True)
+        denom = np.where(rmax - rmin > 1e-9, rmax - rmin, 1e-9)
+        return (attn - rmin) / denom
+
+    for sample_idx in range(2):
+        words = word_labels_list[sample_idx]
+        ecg_raw = ecg_signals[sample_idx]
+        cls_name = class_names[sample_idx]
+        col = sample_idx
+
+        # ---- Row 0: ECG ----
+        ax_ecg = fig.add_subplot(gs[0, col])
+        lead_signal = ecg_raw[ecg_lead]
+        ax_ecg.plot(time_signal, lead_signal, color="#2c3e50", linewidth=0.6)
+        ax_ecg.set_xlim(0, 10)
+        ax_ecg.tick_params(axis="x", labelbottom=False, length=2)
+        ax_ecg.set_yticks([])
+        ax_ecg.text(
+            -0.01, 0.5, "Lead II",
+            transform=ax_ecg.transAxes,
+            fontsize=7, rotation=90, va="center", ha="right",
+        )
+        for spine in ("top", "right", "left"):
+            ax_ecg.spines[spine].set_visible(False)
+        for s in range(1, n_segs):
+            t = s * seg_size * (10.0 / n_patches)
+            ax_ecg.axvline(t, color="#bdc3c7", linewidth=0.3, alpha=0.4)
+        div_ecg = make_axes_locatable(ax_ecg)
+        dummy = div_ecg.append_axes("right", size="5%", pad=0.05)
+        dummy.set_visible(False)
+
+        # ---- Rows 1 & 2: attention heatmaps ----
+        for row_idx, (attn_raw, row_title) in enumerate(zip(
+            (attn_maps_full[sample_idx], attn_maps_abl[sample_idx]),
+            row_titles,
+        )):
+            attn = aggregate_patches(attn_raw, seg_size)
+            attn = _norm_per_row(attn)
+            ax_attn = fig.add_subplot(gs[1 + row_idx, col], sharex=ax_ecg)
+            im = ax_attn.imshow(
+                attn,
+                aspect="auto",
+                cmap="Reds",
+                interpolation="nearest",
+                vmin=0.0, vmax=1.0,
+                extent=[0, 10, len(words) - 0.5, -0.5],
+            )
+            xticks = np.linspace(0, 10, 6)
+            ax_attn.set_xticks(xticks)
+            ax_attn.set_xticklabels([f"{t:.0f}" for t in xticks], fontsize=7)
+            ax_attn.set_xlim(0, 10)
+            ax_attn.set_yticks(range(len(words)))
+            ax_attn.set_yticklabels(words, fontsize=7)
+            ax_attn.text(
+                -0.18, 0.5, row_title,
+                transform=ax_attn.transAxes,
+                fontsize=8, fontweight="bold",
+                rotation=90, va="center", ha="right",
+            )
+            if row_idx == 1:
+                ax_attn.set_xlabel("Time (s)", fontsize=8, labelpad=2)
+            else:
+                ax_attn.tick_params(axis="x", labelbottom=False)
+
+            div = make_axes_locatable(ax_attn)
+            cax = div.append_axes("right", size="5%", pad=0.05)
+            cb = fig.colorbar(im, cax=cax)
+            cb.ax.tick_params(labelsize=5)
+
+        # 子图组标题放在第二个热力图下方
+        ax_attn.text(
+            0.5, -0.32,
+            f"({chr(97 + sample_idx)}) {cls_name}",
+            transform=ax_attn.transAxes,
+            fontweight="bold", fontsize=11,
+            ha="center", va="top",
+        )
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    print(f"对比图已保存至: {output_path}")
+    plt.close(fig)
 
 
 def plot_attention_maps(
@@ -493,31 +683,36 @@ def main():
     print("=" * 60)
 
     # ---- 1. 加载模型 ----
-    print(f"\n[1/5] 加载模型: {args.ckpt}")
+    print(f"\n[1/5] 加载完整模型: {args.ckpt}")
     model = load_model(args.ckpt, device)
+    model_abl = None
+    if args.ckpt_ablation:
+        print(f"          消融模型: {args.ckpt_ablation}")
+        model_abl = load_model(args.ckpt_ablation, device)
 
     # ---- 2. 加载数据集 ----
-    print(f"\n[2/5] 加载 PTB-XL Super 测试集")
-    data_path = os.path.join(args.data_root, "ptbxl")
-    if args.split_csv:
-        split_csv = args.split_csv
-    else:
-        split_csv = os.path.join(
-            args.data_root, "data_split", "ptbxl", "super_class",
-            "ptbxl_super_class_test.csv",
-        )
+    cfg = DATASET_CONFIGS[args.dataset]
+    print(f"\n[2/5] 加载数据集: {args.dataset}")
+    data_path = os.path.join(args.data_root, cfg["data_subdir"])
+    split_csv = args.split_csv or os.path.join(args.data_root, cfg["split_subpath"])
     dataset = ECGDataset(
         data_path=data_path,
         csv_file=split_csv,
         mode="test",
-        dataset_name="ptbxl",
+        dataset_name=cfg["dataset_name"],
     )
+    print(f"  split_csv: {split_csv}")
     print(f"  数据集大小: {len(dataset)}")
     print(f"  类别: {dataset.labels_name}")
 
     # ---- 3. 选取多标签样例 ----
-    print(f"\n[3/5] 自动选取多标签样例: {TARGET_COMBINATIONS}")
-    selected = select_multilabel_samples(dataset, TARGET_COMBINATIONS, seed=args.seed)
+    if args.combinations:
+        import json as _json
+        combos = _json.loads(args.combinations)
+    else:
+        combos = cfg["default_combos"]
+    print(f"\n[3/5] 自动选取多标签样例: {combos}")
+    selected = select_multilabel_samples(dataset, combos, seed=args.seed)
 
     # ---- 4. 加载 CKEPE prompt ----
     print(f"\n[4/5] 加载 CKEPE prompt")
@@ -527,6 +722,7 @@ def main():
     # ---- 5. 提取 attention 并绘图 ----
     print(f"\n[5/5] 提取 attention 矩阵并绘图")
     attn_maps = []
+    attn_maps_abl = []
     word_labels_list = []
     ecg_signals = []
     panel_names = []
@@ -536,31 +732,47 @@ def main():
         combo_labels = info["labels"]
         ecg, target = dataset[idx]
 
-        # 拼接该组合中所有标签的 prompt
         prompt_text = " ".join(prompt_dict[cls] for cls in combo_labels)
-
         print(f"\n  组合: {combo_key} (样例 #{idx})")
         print(f"  标签向量: {target.numpy()}")
         print(f"  拼接 Prompt: {prompt_text[:100]}...")
 
-        attn_map, tokens = extract_attention(model, ecg, prompt_text, device)
-        print(f"  原始 attention 形状: {attn_map.shape}")
+        # --- 完整 TALE: 提 attention 并锁定 top-K 诊断词 ---
+        attn_full, tokens = extract_attention(model, ecg, prompt_text, device)
+        attn_full, tokens = merge_subwords(attn_full, tokens)
+        attn_full, tokens = fix_hyphenated_words(attn_full, tokens)
+        keep, dedup_labels = select_top_words(attn_full, tokens, max_words=10)
+        attn_full_keep, words_keep = apply_word_indices(
+            attn_full, tokens, keep, dedup_labels
+        )
+        print(f"  完整模型词表: {words_keep}")
 
-        attn_map, tokens = merge_subwords(attn_map, tokens)
-        attn_map, tokens = fix_hyphenated_words(attn_map, tokens)
-        attn_map, tokens = filter_diagnostic_words(attn_map, tokens, max_words=10)
-        print(f"  过滤后词语: {tokens}")
-
-        attn_maps.append(attn_map)
-        word_labels_list.append(tokens)
+        attn_maps.append(attn_full_keep)
+        word_labels_list.append(words_keep)
         ecg_signals.append(ecg.numpy())
         panel_names.append(combo_key)
 
+        # --- 消融模型：复用同一组词索引，便于直接对比 ---
+        if model_abl is not None:
+            attn_abl, tokens_abl = extract_attention(model_abl, ecg, prompt_text, device)
+            attn_abl, tokens_abl = merge_subwords(attn_abl, tokens_abl)
+            attn_abl, tokens_abl = fix_hyphenated_words(attn_abl, tokens_abl)
+            attn_abl_keep, _ = apply_word_indices(
+                attn_abl, tokens_abl, keep, dedup_labels
+            )
+            attn_maps_abl.append(attn_abl_keep)
+
     n_patches = attn_maps[0].shape[1]
-    plot_attention_maps(
-        attn_maps, word_labels_list, ecg_signals, panel_names,
-        n_patches, args.output,
-    )
+    if model_abl is not None:
+        plot_attention_maps_compare(
+            attn_maps, attn_maps_abl, word_labels_list, ecg_signals,
+            panel_names, n_patches, args.output,
+        )
+    else:
+        plot_attention_maps(
+            attn_maps, word_labels_list, ecg_signals, panel_names,
+            n_patches, args.output,
+        )
 
     print("\n完成!")
 
